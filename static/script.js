@@ -171,7 +171,7 @@ async function runClustering() {
     try {
         const API_BASE_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
             ? '' 
-            : 'https://doc-cluster-backend.onrender.com'; // Replace with your Render URL after deployment
+            : 'https://doc-cluster-ai.onrender.com'; // Your live Render URL
             
         const response = await fetch(`${API_BASE_URL}/cluster`, { method: 'POST', body: formData });
         const data = await response.json();
