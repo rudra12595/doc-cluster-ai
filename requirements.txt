@@ -1,0 +1,12 @@
+flask
+scikit-learn
+nltk
+numpy
+pypdf
+python-docx
+pandas
+werkzeug
+pytesseract
+Pillow
+PyMuPDF
+flask-cors
