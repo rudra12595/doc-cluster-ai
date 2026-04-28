@@ -9,10 +9,7 @@
     "rewrites": [
       {
         "source": "**",
-        "run": {
-          "serviceId": "doc-cluster-backend",
-          "region": "us-central1"
-        }
+        "destination": "/index.html"
       }
     ]
   }
