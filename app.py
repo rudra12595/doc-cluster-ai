@@ -27,6 +27,11 @@ import concurrent.futures
 import os
 import gc
 
+# Configure Tesseract path if installed on Windows
+tess_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+if os.path.exists(tess_path):
+    pytesseract.pytesseract.tesseract_cmd = tess_path
+
 app = Flask(__name__)
 CORS(app) # Enable CORS for all routes
 
@@ -47,7 +52,7 @@ def extract_text(filename, file_bytes):
                     page_count = 0
                     ocr_img_count = 0
                     for page in doc:
-                        if page_count >= 2: # Reduce to first 2 pages for speed
+                        if page_count >= 10: # Limit to first 10 pages
                             break
                         page_text = page.get_text()
                         text += page_text + "\n"
@@ -56,7 +61,7 @@ def extract_text(filename, file_bytes):
                         if len(page_text.strip()) < 50:
                             # Extract images from page
                             for img_info in page.get_images(full=True):
-                                if ocr_img_count >= 2: # Max 2 images per document
+                                if ocr_img_count >= 5: # Max 5 images per document
                                     break
                                 xref = img_info[0]
                                 try:
@@ -64,7 +69,7 @@ def extract_text(filename, file_bytes):
                                     image_bytes = base_image["image"]
                                     pil_img = Image.open(io.BytesIO(image_bytes))
                                     # Skip tiny images (likely icons or lines)
-                                    if pil_img.width >= 300 and pil_img.height >= 300:
+                                    if pil_img.width >= 100 and pil_img.height >= 100:
                                         pil_img.thumbnail((800, 800))
                                         ocr_text = pytesseract.image_to_string(pil_img)
                                         if ocr_text: text += ocr_text + "\n"
@@ -90,12 +95,12 @@ def extract_text(filename, file_bytes):
                 img_count = 0
                 for rel in doc.part.rels.values():
                     if "image" in rel.target_ref:
-                        if img_count >= 5: # max 5 images for OCR
+                        if img_count >= 10: # max 10 images for OCR
                             break
                         try:
                             image_data = rel.target_part.blob
                             pil_img = Image.open(io.BytesIO(image_data))
-                            if pil_img.width >= 300 and pil_img.height >= 300:
+                            if pil_img.width >= 100 and pil_img.height >= 100:
                                 pil_img.thumbnail((800, 800))
                                 ocr_text = pytesseract.image_to_string(pil_img)
                                 if ocr_text: text += ocr_text + "\n"
@@ -121,6 +126,40 @@ def extract_text(filename, file_bytes):
 def home():
     return render_template('index.html')
 
+@app.route('/api/get_true_path', methods=['GET'])
+def get_true_path():
+    filename = request.args.get('filename')
+    if not filename:
+        return jsonify({"error": "No filename provided"}), 400
+        
+    # Extract just the basename in case it has relative folder parts
+    basename = os.path.basename(filename)
+    
+    # Common search directories
+    user_home = os.path.expanduser('~')
+    search_dirs = [
+        os.path.join(user_home, 'Desktop'),
+        os.path.join(user_home, 'Downloads'),
+        os.path.join(user_home, 'Documents')
+    ]
+    
+    # Search for the file
+    for s_dir in search_dirs:
+        if not os.path.exists(s_dir):
+            continue
+        for root, dirs, files in os.walk(s_dir):
+            if basename in files:
+                true_path = os.path.join(root, basename)
+                return jsonify({"path": true_path.replace('/', '\\')})
+                
+    # If not found in standard dirs, try searching the current working directory
+    for root, dirs, files in os.walk(os.getcwd()):
+        if basename in files:
+            true_path = os.path.join(root, basename)
+            return jsonify({"path": true_path.replace('/', '\\')})
+            
+    return jsonify({"error": "File not found"}), 404
+
 @app.route('/cluster', methods=['POST'])
 def cluster():
     try:
@@ -134,6 +173,21 @@ def cluster():
                 documents.append({"title": f"Pasted Text {i+1}", "text": d})
         except:
             pass
+            
+        # 1.5 Parse native local absolute paths (Bypassing browser security)
+        local_paths_json = request.form.get('local_paths', '[]')
+        try:
+            local_paths = json.loads(local_paths_json)
+            for path in local_paths:
+                if os.path.exists(path):
+                    with open(path, 'rb') as f:
+                        fbytes = f.read()
+                    fname = os.path.basename(path).lower()
+                    txt = extract_text(fname, fbytes)
+                    if len(txt) > 10:
+                        documents.append({"title": os.path.basename(path), "text": txt, "path": path})
+        except Exception as e:
+            print(f"Error processing local absolute paths: {e}")
                 
         # 2. Parse file uploads concurrently
         if 'files' in request.files:

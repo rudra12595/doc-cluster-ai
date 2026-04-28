@@ -4,6 +4,7 @@ const COLORS = ['#6366f1', '#a855f7', '#ec4899', '#f97316', '#10b981', '#06b6d4'
 
 // State
 let stagedFiles = [];
+let stagedLocalPaths = []; // Track perfect absolute paths
 let stagedRawDocs = [];
 let clusterState = null; 
 let chartInstance = null;
@@ -39,10 +40,11 @@ if (dropZone) {
     });
 }
 
-function traverseFileTree(item, files) {
+function traverseFileTree(item, files, path = '') {
     return new Promise((resolve) => {
         if (item.isFile) {
             item.file((file) => {
+                file.customPath = path + file.name;
                 files.push(file);
                 resolve();
             });
@@ -50,7 +52,7 @@ function traverseFileTree(item, files) {
             const dirReader = item.createReader();
             dirReader.readEntries(async (entries) => {
                 for (let i = 0; i < entries.length; i++) {
-                    await traverseFileTree(entries[i], files);
+                    await traverseFileTree(entries[i], files, path + item.name + '/');
                 }
                 resolve();
             });
@@ -75,6 +77,32 @@ function handleFiles(files) {
     renderStagedFiles();
 }
 
+async function selectLocalFiles() {
+    try {
+        const res = await fetch('/api/select_local_files');
+        const data = await res.json();
+        if (data.paths && data.paths.length > 0) {
+            data.paths.forEach(p => stagedLocalPaths.push(p));
+            renderStagedFiles();
+        }
+    } catch (e) {
+        alert("Error connecting to local server file picker: " + e.message);
+    }
+}
+
+async function selectLocalFolder() {
+    try {
+        const res = await fetch('/api/select_local_folder');
+        const data = await res.json();
+        if (data.paths && data.paths.length > 0) {
+            data.paths.forEach(p => stagedLocalPaths.push(p));
+            renderStagedFiles();
+        }
+    } catch (e) {
+        alert("Error connecting to local server file picker: " + e.message);
+    }
+}
+
 function addPastedText() {
     const text = document.getElementById('doc-input').value.trim();
     if(text) {
@@ -90,7 +118,7 @@ function renderStagedFiles() {
     const container = document.getElementById('staged-files-container');
     const countEl = document.getElementById('staged-count');
     
-    if (stagedFiles.length === 0 && stagedRawDocs.length === 0) {
+    if (stagedFiles.length === 0 && stagedRawDocs.length === 0 && stagedLocalPaths.length === 0) {
         container.classList.add('hidden');
         countEl.innerText = "0";
         return;
@@ -100,9 +128,21 @@ function renderStagedFiles() {
     
     let html = '';
     stagedFiles.forEach((f, i) => {
+        const fPath = f.webkitRelativePath || f.customPath || f.name;
         html += `<li>
             <span><i class="fa-solid fa-file-lines" style="color:var(--accent-primary); margin-right:8px;"></i> ${f.name}</span>
-            <button class="btn-text" onclick="removeFile(${i})" style="color:var(--danger);">Remove</button>
+            <div style="display:flex; gap:10px;">
+                <button class="btn-text" onclick="removeFile(${i})" style="color:var(--danger);">Remove</button>
+            </div>
+        </li>`;
+    });
+    stagedLocalPaths.forEach((p, i) => {
+        const filename = p.split('\\').pop().split('/').pop();
+        html += `<li>
+            <span><i class="fa-solid fa-hard-drive" style="color:var(--accent-primary); margin-right:8px;"></i> ${filename}</span>
+            <div style="display:flex; gap:10px;">
+                <button class="btn-text" onclick="removeLocalFile(${i})" style="color:var(--danger);">Remove</button>
+            </div>
         </li>`;
     });
     if(stagedRawDocs.length > 0) {
@@ -112,12 +152,13 @@ function renderStagedFiles() {
         </li>`;
     }
     list.innerHTML = html;
-    countEl.innerText = stagedFiles.length + stagedRawDocs.length;
+    countEl.innerText = stagedFiles.length + stagedRawDocs.length + stagedLocalPaths.length;
 }
 
 function removeFile(index) { stagedFiles.splice(index, 1); renderStagedFiles(); }
+function removeLocalFile(index) { stagedLocalPaths.splice(index, 1); renderStagedFiles(); }
 function clearRaw() { stagedRawDocs = []; renderStagedFiles(); }
-function clearAllStaged() { stagedFiles = []; stagedRawDocs = []; renderStagedFiles(); }
+function clearAllStaged() { stagedFiles = []; stagedRawDocs = []; stagedLocalPaths = []; renderStagedFiles(); }
 
 function updateKValue(val) {
     document.getElementById('k-bubble').innerText = val;
@@ -148,8 +189,8 @@ function loadSampleDocs() {
 
 // --- 3. CLUSTERING PIPELINE ---
 async function runClustering() {
-    if(stagedFiles.length === 0 && stagedRawDocs.length === 0) {
-        alert("Please upload some files or paste text first!");
+    if(stagedFiles.length === 0 && stagedRawDocs.length === 0 && stagedLocalPaths.length === 0) {
+        alert("Please upload some files, paste text, or select local files first!");
         return;
     }
     
@@ -162,9 +203,10 @@ async function runClustering() {
     formData.append('custom_names', document.getElementById('custom-names').value);
     
     if(stagedRawDocs.length > 0) formData.append('raw_documents', JSON.stringify(stagedRawDocs));
+    if(stagedLocalPaths.length > 0) formData.append('local_paths', JSON.stringify(stagedLocalPaths));
     
     // Add file paths for local management
-    const paths = stagedFiles.map(f => f.webkitRelativePath || f.name);
+    const paths = stagedFiles.map(f => f.webkitRelativePath || f.customPath || f.name);
     formData.append('file_paths', JSON.stringify(paths));
     stagedFiles.forEach(f => formData.append('files', f));
 
@@ -345,20 +387,33 @@ function downloadCSV() {
     saveAs(new Blob([csvContent], {type: "text/csv;charset=utf-8"}), "DocCluster_AI_Report.csv");
 }
 
-function copyPath(btn) {
-    const path = btn.getAttribute('data-path');
-    const rootEl = document.getElementById('root-path');
+async function copyPath(btn) {
+    let path = btn.getAttribute('data-path');
+    
+    // Convert any forward slashes to Windows backslashes for pasting locally
+    path = path.replace(/\//g, '\\');
+    
     let finalPath = path;
     
-    if (rootEl && rootEl.value.trim()) {
-        let root = rootEl.value.trim();
-        if ((root.endsWith('\\') || root.endsWith('/')) && (path.startsWith('\\') || path.startsWith('/'))) {
-            root = root.slice(0, -1);
+    // If the path is relative, ask the Python server to hunt down the exact file location
+    if (!path.includes(':')) {
+        try {
+            const filename = path.split('\\').pop().split('/').pop();
+            const response = await fetch('/api/get_true_path?filename=' + encodeURIComponent(filename));
+            if (response.ok) {
+                const data = await response.json();
+                if (data.path) {
+                    finalPath = data.path;
+                }
+            }
+        } catch (e) {
+            console.warn("Could not reach local server to resolve true path.");
         }
-        if (!(root.endsWith('\\') || root.endsWith('/')) && !(path.startsWith('\\') || path.startsWith('/'))) {
-            root += '\\'; 
-        }
-        finalPath = root + path;
+    }
+    
+    // Fallback warning if STILL no absolute path found
+    if (!finalPath.includes(':')) {
+        alert("Warning: The website searched your computer but could not find the exact folder location of '" + finalPath + "'. (Make sure the file is in Downloads, Desktop, or Documents). Only the file name was copied.");
     }
 
     // Fallback copy method

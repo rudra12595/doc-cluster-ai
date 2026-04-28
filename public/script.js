@@ -51,10 +51,11 @@ if (dropZone) {
     });
 }
 
-function traverseFileTree(item, files) {
+function traverseFileTree(item, files, path = '') {
     return new Promise((resolve) => {
         if (item.isFile) {
             item.file((file) => {
+                file.customPath = path + file.name;
                 files.push(file);
                 resolve();
             });
@@ -62,7 +63,7 @@ function traverseFileTree(item, files) {
             const dirReader = item.createReader();
             dirReader.readEntries(async (entries) => {
                 for (let i = 0; i < entries.length; i++) {
-                    await traverseFileTree(entries[i], files);
+                    await traverseFileTree(entries[i], files, path + item.name + '/');
                 }
                 resolve();
             });
@@ -112,9 +113,13 @@ function renderStagedFiles() {
     
     let html = '';
     stagedFiles.forEach((f, i) => {
+        const fPath = f.webkitRelativePath || f.customPath || f.name;
         html += `<li>
             <span><i class="fa-solid fa-file-lines" style="color:var(--accent-primary); margin-right:8px;"></i> ${f.name}</span>
-            <button class="btn-text" onclick="removeFile(${i})" style="color:var(--danger);">Remove</button>
+            <div style="display:flex; gap:10px;">
+                <button class="btn-text btn-copy" onclick="copyPath(this, '${encodeURIComponent(fPath)}')" style="color:var(--accent-secondary); font-size:12px;"><i class="fa-regular fa-copy"></i> Copy Path</button>
+                <button class="btn-text" onclick="removeFile(${i})" style="color:var(--danger);">Remove</button>
+            </div>
         </li>`;
     });
     if(stagedRawDocs.length > 0) {
@@ -174,7 +179,13 @@ async function runClustering() {
     formData.append('custom_names', document.getElementById('custom-names').value);
     
     if(stagedRawDocs.length > 0) formData.append('raw_documents', JSON.stringify(stagedRawDocs));
-    stagedFiles.forEach(f => formData.append('files', f));
+    
+    const filePaths = [];
+    stagedFiles.forEach(f => {
+        formData.append('files', f);
+        filePaths.push(f.webkitRelativePath || f.customPath || f.name);
+    });
+    formData.append('file_paths', JSON.stringify(filePaths));
 
     try {
         const response = await fetch(`${API_BASE_URL}/cluster`, { method: 'POST', body: formData });
@@ -212,14 +223,17 @@ function buildUI(data) {
         clusterState.push({ id: c, name: info.name, color: color, docs: info.docs });
         
         let chips = info.keywords.map(k => `<span class="chip">${k}</span>`).join('');
-        let docsHtml = info.docs.map(doc => `
+        let docsHtml = info.docs.map(doc => {
+            const docPath = doc.path || doc.title;
+            return `
             <div class="doc-item" data-title="${doc.title}" data-conf="${doc.confidence}" data-text="${encodeURIComponent(doc.text)}">
                 <div class="doc-title">
                     <span>${doc.title} <span class="badge" style="color:${color}">${doc.confidence}%</span></span>
+                    <button class="btn-copy" data-path="${docPath}" onclick="copyPath(this)"><i class="fa-regular fa-copy"></i> Copy Path</button>
                 </div>
                 <div class="doc-preview">${doc.text.substring(0,60)}...</div>
             </div>
-        `).join('');
+        `}).join('');
 
         grid.innerHTML += `
             <div class="folder-card" style="--folder-color: ${color}">
@@ -349,3 +363,38 @@ function downloadCSV() {
     });
     saveAs(new Blob([csvContent], {type: "text/csv;charset=utf-8"}), "DocCluster_AI_Report.csv");
 }
+
+window.copyPath = async function copyPath(btn) {
+    let path = btn.getAttribute('data-path');
+    
+    // Convert any forward slashes to Windows backslashes for pasting locally
+    path = path.replace(/\//g, '\\');
+    
+    let finalPath = path;
+    
+    // If the path is relative, ask the Python server to hunt down the exact file location
+    if (!path.includes(':')) {
+        try {
+            const filename = path.split('\\').pop().split('/').pop();
+            const response = await fetch('/api/get_true_path?filename=' + encodeURIComponent(filename));
+            if (response.ok) {
+                const data = await response.json();
+                if (data.path) {
+                    finalPath = data.path;
+                }
+            }
+        } catch (e) {
+            console.warn("Could not reach server to resolve true path.");
+        }
+    }
+    
+    if (!finalPath.includes(':')) {
+        alert("Warning: Because this is running directly in the browser without a local connection, only the relative file name (" + finalPath + ") can be copied. Windows requires an absolute path (like C:\\...) to open the file.");
+    }
+
+    navigator.clipboard.writeText(finalPath).then(() => {
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '<i class="fa-solid fa-check"></i> Copied';
+        setTimeout(() => { btn.innerHTML = originalText; }, 2000);
+    });
+};
