@@ -45,8 +45,9 @@ def extract_text(filename, file_bytes):
                 try:
                     doc = fitz.open(stream=file_bytes, filetype="pdf")
                     page_count = 0
+                    ocr_img_count = 0
                     for page in doc:
-                        if page_count >= 10:
+                        if page_count >= 2: # Reduce to first 2 pages for speed
                             break
                         page_text = page.get_text()
                         text += page_text + "\n"
@@ -55,6 +56,8 @@ def extract_text(filename, file_bytes):
                         if len(page_text.strip()) < 50:
                             # Extract images from page
                             for img_info in page.get_images(full=True):
+                                if ocr_img_count >= 2: # Max 2 images per document
+                                    break
                                 xref = img_info[0]
                                 try:
                                     base_image = doc.extract_image(xref)
@@ -67,6 +70,7 @@ def extract_text(filename, file_bytes):
                                         if ocr_text: text += ocr_text + "\n"
                                     del pil_img
                                     gc.collect()
+                                    ocr_img_count += 1
                                 except Exception as img_e:
                                     print(f"Error processing image {xref} in PDF: {img_e}")
                         page_count += 1
