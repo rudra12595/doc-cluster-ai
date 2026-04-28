@@ -44,23 +44,32 @@ def extract_text(filename, file_bytes):
             if fitz:
                 try:
                     doc = fitz.open(stream=file_bytes, filetype="pdf")
+                    page_count = 0
                     for page in doc:
-                        text += page.get_text() + "\n"
-                        # Extract images from page
-                        for img_info in page.get_images(full=True):
-                            xref = img_info[0]
-                            try:
-                                base_image = doc.extract_image(xref)
-                                image_bytes = base_image["image"]
-                                pil_img = Image.open(io.BytesIO(image_bytes))
-                                # Resize to speed up OCR and prevent memory issues
-                                pil_img.thumbnail((1000, 1000))
-                                ocr_text = pytesseract.image_to_string(pil_img)
-                                if ocr_text: text += ocr_text + "\n"
-                                del pil_img
-                                gc.collect()
-                            except Exception as img_e:
-                                print(f"Error processing image {xref} in PDF: {img_e}")
+                        if page_count >= 10:
+                            break
+                        page_text = page.get_text()
+                        text += page_text + "\n"
+                        
+                        # Skip OCR if the page already has a good amount of text
+                        if len(page_text.strip()) < 50:
+                            # Extract images from page
+                            for img_info in page.get_images(full=True):
+                                xref = img_info[0]
+                                try:
+                                    base_image = doc.extract_image(xref)
+                                    image_bytes = base_image["image"]
+                                    pil_img = Image.open(io.BytesIO(image_bytes))
+                                    # Skip tiny images (likely icons or lines)
+                                    if pil_img.width >= 300 and pil_img.height >= 300:
+                                        pil_img.thumbnail((800, 800))
+                                        ocr_text = pytesseract.image_to_string(pil_img)
+                                        if ocr_text: text += ocr_text + "\n"
+                                    del pil_img
+                                    gc.collect()
+                                except Exception as img_e:
+                                    print(f"Error processing image {xref} in PDF: {img_e}")
+                        page_count += 1
                 except Exception as e:
                     print(f"PyMuPDF error: {e}")
             elif PdfReader:
@@ -72,18 +81,25 @@ def extract_text(filename, file_bytes):
             doc = docx.Document(io.BytesIO(file_bytes))
             for para in doc.paragraphs:
                 text += para.text + "\n"
-            for rel in doc.part.rels.values():
-                if "image" in rel.target_ref:
-                    try:
-                        image_data = rel.target_part.blob
-                        pil_img = Image.open(io.BytesIO(image_data))
-                        pil_img.thumbnail((1000, 1000))
-                        ocr_text = pytesseract.image_to_string(pil_img)
-                        if ocr_text: text += ocr_text + "\n"
-                        del pil_img
-                        gc.collect()
-                    except Exception as e:
-                        print(f"Error OCR on DOCX image: {e}")
+                
+            if len(text.strip()) < 100:
+                img_count = 0
+                for rel in doc.part.rels.values():
+                    if "image" in rel.target_ref:
+                        if img_count >= 5: # max 5 images for OCR
+                            break
+                        try:
+                            image_data = rel.target_part.blob
+                            pil_img = Image.open(io.BytesIO(image_data))
+                            if pil_img.width >= 300 and pil_img.height >= 300:
+                                pil_img.thumbnail((800, 800))
+                                ocr_text = pytesseract.image_to_string(pil_img)
+                                if ocr_text: text += ocr_text + "\n"
+                            del pil_img
+                            gc.collect()
+                            img_count += 1
+                        except Exception as e:
+                            print(f"Error OCR on DOCX image: {e}")
         elif filename.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
             try:
                 pil_img = Image.open(io.BytesIO(file_bytes))
