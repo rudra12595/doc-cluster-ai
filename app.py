@@ -25,6 +25,7 @@ import pytesseract
 from PIL import Image
 import concurrent.futures
 import os
+import gc
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for all routes
@@ -53,9 +54,11 @@ def extract_text(filename, file_bytes):
                                 image_bytes = base_image["image"]
                                 pil_img = Image.open(io.BytesIO(image_bytes))
                                 # Resize to speed up OCR and prevent memory issues
-                                pil_img.thumbnail((1200, 1200))
+                                pil_img.thumbnail((1000, 1000))
                                 ocr_text = pytesseract.image_to_string(pil_img)
                                 if ocr_text: text += ocr_text + "\n"
+                                del pil_img
+                                gc.collect()
                             except Exception as img_e:
                                 print(f"Error processing image {xref} in PDF: {img_e}")
                 except Exception as e:
@@ -74,16 +77,20 @@ def extract_text(filename, file_bytes):
                     try:
                         image_data = rel.target_part.blob
                         pil_img = Image.open(io.BytesIO(image_data))
-                        pil_img.thumbnail((1200, 1200))
+                        pil_img.thumbnail((1000, 1000))
                         ocr_text = pytesseract.image_to_string(pil_img)
                         if ocr_text: text += ocr_text + "\n"
+                        del pil_img
+                        gc.collect()
                     except Exception as e:
                         print(f"Error OCR on DOCX image: {e}")
         elif filename.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
             try:
                 pil_img = Image.open(io.BytesIO(file_bytes))
-                pil_img.thumbnail((1600, 1600))
+                pil_img.thumbnail((1000, 1000))
                 text = pytesseract.image_to_string(pil_img)
+                del pil_img
+                gc.collect()
             except Exception as e:
                 print(f"Error OCR on standalone image: {e}")
     except Exception as e:
@@ -117,25 +124,24 @@ def cluster():
             except:
                 file_paths = []
             
-            file_data_list = []
             for i, f in enumerate(files):
                 if f.filename:
-                    fname = secure_filename(f.filename).lower()
-                    path = file_paths[i] if i < len(file_paths) else f.filename
-                    file_data_list.append((fname, f.read(), f.filename, path)) 
+                    orig_fname = f.filename
+                    fname = secure_filename(orig_fname).lower()
+                    path = file_paths[i] if i < len(file_paths) else orig_fname
                     
-            # Cap max_workers
-            max_workers = min(4, os.cpu_count() or 1)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_file = {executor.submit(extract_text, fname, fbytes): (orig_fname, path) for fname, fbytes, orig_fname, path in file_data_list}
-                for future in concurrent.futures.as_completed(future_to_file):
-                    orig_fname, path = future_to_file[future]
                     try:
-                        txt = future.result()
+                        fbytes = f.read()
+                        txt = extract_text(fname, fbytes)
                         if len(txt) > 10:
                             documents.append({"title": orig_fname, "text": txt, "path": path})
                     except Exception as exc:
                         print(f"Error processing {orig_fname}: {exc}")
+                    finally:
+                        # Explicitly clear variables and run garbage collection
+                        fbytes = None
+                        txt = None
+                        gc.collect()
 
         if not documents:
             return jsonify({'error': 'Please provide valid documents (text, pdf, docx, csv) with some text content.'}), 400
