@@ -8,6 +8,8 @@ let stagedLocalPaths = []; // Track perfect absolute paths
 let stagedRawDocs = [];
 let clusterState = null; 
 let chartInstance = null;
+let progressInterval;
+let currentProgress = 0;
 
 // --- 1. UI SETUP (Drag & Drop) ---
 const dropZone = document.getElementById('drop-zone');
@@ -198,6 +200,32 @@ async function runClustering() {
     document.getElementById('results').classList.add('hidden');
     document.getElementById('error-msg').classList.add('hidden');
     
+    // Start Progress Animation
+    currentProgress = 0;
+    const pBar = document.getElementById('progress-bar');
+    const pText = document.getElementById('progress-text');
+    const lText = document.getElementById('loading-text');
+    
+    if(pBar) pBar.style.width = '0%';
+    if(pText) pText.innerText = '0%';
+    
+    clearInterval(progressInterval);
+    progressInterval = setInterval(() => {
+        let remaining = 95 - currentProgress;
+        let step = remaining * 0.05;
+        if (step < 0.2) step = 0.2;
+        currentProgress += step;
+        if (currentProgress > 95) currentProgress = 95;
+        
+        if(pBar) pBar.style.width = `${currentProgress}%`;
+        if(pText) pText.innerText = `${Math.floor(currentProgress)}%`;
+        
+        if (currentProgress < 30) lText.innerText = "Extracting text and scanning documents...";
+        else if (currentProgress < 60) lText.innerText = "Vectorizing content with NLP...";
+        else if (currentProgress < 85) lText.innerText = "Mapping high-dimensional topic space...";
+        else lText.innerText = "Finalizing AI clusters and naming folders...";
+    }, 400);
+    
     const formData = new FormData();
     formData.append('n_clusters', document.getElementById('k-slider').value);
     formData.append('custom_names', document.getElementById('custom-names').value);
@@ -220,21 +248,52 @@ async function runClustering() {
         
         if (!response.ok) throw new Error(data.error || 'Server error');
         
-        buildUI(data);
+        await buildUI(data);
     } catch(err) {
         const errEl = document.getElementById('error-msg');
         errEl.innerText = "❌ " + err.message;
         errEl.classList.remove('hidden');
     } finally {
-        document.getElementById('loading').classList.add('hidden');
+        clearInterval(progressInterval);
+        const pBar = document.getElementById('progress-bar');
+        const pText = document.getElementById('progress-text');
+        if(pBar) pBar.style.width = '100%';
+        if(pText) pText.innerText = '100%';
+        
+        setTimeout(() => {
+            document.getElementById('loading').classList.add('hidden');
+        }, 300);
     }
 }
 
 // --- 4. RENDER RESULTS ---
-function buildUI(data) {
+async function buildUI(data) {
     const { cluster_info, n_clusters, coords } = data;
     const grid = document.getElementById('folder-grid');
     grid.innerHTML = '';
+    
+    // Pre-fetch all true absolute paths
+    let allFilenames = [];
+    for (let c = 0; c < n_clusters; c++) {
+        if(cluster_info[c] && cluster_info[c].docs) {
+            allFilenames.push(...cluster_info[c].docs.map(d => d.path || d.title));
+        }
+    }
+    
+    let resolvedPaths = {};
+    try {
+        const response = await fetch('/api/get_true_paths', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({filenames: allFilenames})
+        });
+        if(response.ok) {
+            const data = await response.json();
+            resolvedPaths = data.paths || {};
+        }
+    } catch(e) {
+        console.warn("Could not pre-fetch true paths");
+    }
     
     clusterState = []; 
     
@@ -246,17 +305,20 @@ function buildUI(data) {
         clusterState.push({ id: c, name: info.name, color: color, docs: info.docs });
         
         let chips = info.keywords.map(k => `<span class="chip">${k}</span>`).join('');
-        let docsHtml = info.docs.map(doc => `
-            <div class="doc-item" data-title="${doc.title}" data-conf="${doc.confidence}" data-text="${encodeURIComponent(doc.text)}" data-path="${doc.path || doc.title}">
+        let docsHtml = info.docs.map(doc => {
+            const originalPath = doc.path || doc.title;
+            const docPath = resolvedPaths[originalPath] || originalPath;
+            return `
+            <div class="doc-item" data-title="${doc.title}" data-conf="${doc.confidence}" data-text="${encodeURIComponent(doc.text)}">
                 <div class="doc-title">
                     <span>${doc.title} <span class="badge" style="color:${color}">${doc.confidence}%</span></span>
-                    <button class="btn-icon-sm" title="Copy File Path" data-path="${doc.path || doc.title}" onclick="copyPath(this)">
-                        <i class="fa-regular fa-copy"></i>
+                    <button class="btn-icon-sm" title="Copy File Path" data-path="${docPath}" onclick="copyPath(this)">
+                        <i class="fa-regular fa-copy"></i> Copy Path
                     </button>
                 </div>
                 <div class="doc-preview">${doc.text.substring(0,60)}...</div>
             </div>
-        `).join('');
+        `}).join('');
 
         grid.innerHTML += `
             <div class="folder-card" style="--folder-color: ${color}">
@@ -387,29 +449,13 @@ function downloadCSV() {
     saveAs(new Blob([csvContent], {type: "text/csv;charset=utf-8"}), "DocCluster_AI_Report.csv");
 }
 
-async function copyPath(btn) {
+function copyPath(btn) {
     let path = btn.getAttribute('data-path');
     
     // Convert any forward slashes to Windows backslashes for pasting locally
     path = path.replace(/\//g, '\\');
     
     let finalPath = path;
-    
-    // If the path is relative, ask the Python server to hunt down the exact file location
-    if (!path.includes(':')) {
-        try {
-            const filename = path.split('\\').pop().split('/').pop();
-            const response = await fetch('/api/get_true_path?filename=' + encodeURIComponent(filename));
-            if (response.ok) {
-                const data = await response.json();
-                if (data.path) {
-                    finalPath = data.path;
-                }
-            }
-        } catch (e) {
-            console.warn("Could not reach local server to resolve true path.");
-        }
-    }
     
     // Fallback warning if STILL no absolute path found
     if (!finalPath.includes(':')) {

@@ -126,39 +126,57 @@ def extract_text(filename, file_bytes):
 def home():
     return render_template('index.html')
 
-@app.route('/api/get_true_path', methods=['GET'])
-def get_true_path():
-    filename = request.args.get('filename')
-    if not filename:
-        return jsonify({"error": "No filename provided"}), 400
-        
-    # Extract just the basename in case it has relative folder parts
-    basename = os.path.basename(filename)
-    
-    # Common search directories
-    user_home = os.path.expanduser('~')
-    search_dirs = [
-        os.path.join(user_home, 'Desktop'),
-        os.path.join(user_home, 'Downloads'),
-        os.path.join(user_home, 'Documents')
-    ]
-    
-    # Search for the file
-    for s_dir in search_dirs:
-        if not os.path.exists(s_dir):
-            continue
-        for root, dirs, files in os.walk(s_dir):
-            if basename in files:
-                true_path = os.path.join(root, basename)
-                return jsonify({"path": true_path.replace('/', '\\')})
-                
-    # If not found in standard dirs, try searching the current working directory
-    for root, dirs, files in os.walk(os.getcwd()):
-        if basename in files:
-            true_path = os.path.join(root, basename)
-            return jsonify({"path": true_path.replace('/', '\\')})
+@app.route('/api/get_true_paths', methods=['POST'])
+def get_true_paths():
+    try:
+        data = request.json
+        if not data or 'filenames' not in data:
+            return jsonify({"error": "No filenames provided"}), 400
             
-    return jsonify({"error": "File not found"}), 404
+        filenames = data['filenames']
+        basenames = {os.path.basename(f): f for f in filenames}
+        found_paths = {}
+        
+        # Fast search in common directories first
+        user_home = os.path.expanduser('~')
+        common_dirs = [
+            os.path.join(user_home, 'Desktop'),
+            os.path.join(user_home, 'Downloads'),
+            os.path.join(user_home, 'Documents'),
+            os.getcwd()
+        ]
+        
+        # Directories to skip to make search lightning fast
+        skip_dirs = {'appdata', 'node_modules', '.cache', '.git', '.vscode', 'venv', 'env', 'program files', 'windows', '$recycle.bin', 'programdata'}
+        
+        def smart_search(directories):
+            for s_dir in directories:
+                if not os.path.exists(s_dir): continue
+                for root, dirs, files in os.walk(s_dir):
+                    # Prune ignored directories in-place
+                    dirs[:] = [d for d in dirs if d.lower() not in skip_dirs and not d.startswith('.')]
+                    
+                    for b_name in list(basenames.keys()):
+                        if b_name in files:
+                            true_path = os.path.join(root, b_name)
+                            found_paths[basenames[b_name]] = true_path.replace('/', '\\')
+                            del basenames[b_name]
+                    if not basenames: # All found
+                        return True
+            return False
+
+        # Phase 1: Fast Common Dirs
+        if not smart_search(common_dirs):
+            # Phase 2: Entire User Home Directory
+            if not smart_search([user_home]):
+                # Phase 3: Other Drives (C:\, D:\, E:\)
+                import string
+                drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+                smart_search(drives)
+                
+        return jsonify({"paths": found_paths})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/cluster', methods=['POST'])
 def cluster():
